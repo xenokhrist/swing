@@ -403,18 +403,62 @@ class PrecisionEntryGenerator:
                 elif abs(current_price - fib_382) / current_price < 0.02:
                     fib_level = 0.382
             
-            # Determine confidence based on confluence
+            # ============================================================================
+            # ADVANCED CONFLUENCE LOGIC
+            # ============================================================================
+
             confluence_score = 0
+            confluence_reasons = []
+
+            # --- Structural confluence ---
             if ema_support:
                 confluence_score += 1
+                confluence_reasons.append("EMA support")
             if prior_resistance_support:
                 confluence_score += 1
+                confluence_reasons.append("S/R flip")
             if fib_level is not None:
                 confluence_score += 1
+                confluence_reasons.append(f"Fib {fib_level}")
             if supports and supports[0].strength >= 7:
                 confluence_score += 1
-            
-            confidence = min(confluence_score / 4, 1.0)
+                confluence_reasons.append("Strong support")
+
+            # --- Volume confluence ---
+            vol_20 = data['Volume'].rolling(20).mean().iloc[-1]
+            vol_ratio = latest['Volume'] / vol_20 if vol_20 > 0 else 1
+            if vol_ratio > 1.3:
+                confluence_score += 1
+                confluence_reasons.append("Volume surge")
+
+            # --- Momentum confluence (RSI / MACD alignment) ---
+            rsi = float(latest.get('RSI', 50))
+            macd = float(latest.get('MACD', 0))
+            if (structure == PriceStructure.HIGHER_HIGHS_HIGHER_LOWS and rsi > 50 and macd > 0):
+                confluence_score += 1
+                confluence_reasons.append("RSI>50 + MACD>0")
+            elif (structure == PriceStructure.LOWER_HIGHS_LOWER_LOWS and rsi < 50 and macd < 0):
+                confluence_score += 1
+                confluence_reasons.append("RSI<50 + MACD<0")
+
+            # --- Multi-timeframe trend alignment (e.g. weekly) ---
+            if 'Close' in data:
+                try:
+                    # Resample to weekly (assuming daily OHLC data)
+                    weekly_close = data['Close'].resample('W').last()
+                    weekly_ema20 = weekly_close.ewm(span=20).mean().iloc[-1]
+                    if weekly_close.iloc[-1] > weekly_ema20 and structure in [PriceStructure.HIGHER_HIGHS_HIGHER_LOWS, PriceStructure.BREAKOUT_PULLBACK]:
+                        confluence_score += 1
+                        confluence_reasons.append("Weekly uptrend alignment")
+                    elif weekly_close.iloc[-1] < weekly_ema20 and structure == PriceStructure.LOWER_HIGHS_LOWER_LOWS:
+                        confluence_score += 1
+                        confluence_reasons.append("Weekly downtrend alignment")
+                except Exception as e:
+                    logger.debug(f"Weekly alignment skipped: {str(e)}")
+
+            # --- Normalize confidence ---
+            confidence = min(confluence_score / 6, 1.0)  # Now using 6 potential points
+
             
             # Risk rating
             if risk_pct < 0.04:
@@ -425,15 +469,9 @@ class PrecisionEntryGenerator:
                 risk_rating = "High"
             
             # Build entry reason
-            reasons = [f"{structure.value} structure"]
-            if ema_support:
-                reasons.append("EMA support")
-            if prior_resistance_support:
-                reasons.append("S/R flip")
-            if fib_level:
-                reasons.append(f"Fib {fib_level}")
-            
-            entry_reason = " + ".join(reasons)
+            entry_reason = f"{structure.value} structure"
+            if confluence_reasons:
+                entry_reason += " + " + " + ".join(confluence_reasons)
             
             # Trailing stop activation (when up 1R)
             trailing_activation = current_price + risk_amount
@@ -714,3 +752,36 @@ class EntryOrderGenerator:
                     valid_until=valid_until,
                     notes=f"Entry 3: {precision_entry.entry_3_size_pct*100:.0f}% at {precision_entry.entry_3_price:.0f}"
                 ))
+
+# ============================================================================
+# PRECISION ENTRY FORMATTER (for display & reporting)
+# ============================================================================
+
+class PrecisionEntryFormatter:
+    """Formats PrecisionEntry and EntryOrder objects for readable console output."""
+
+    @staticmethod
+    def format_entry_plan(entry, total_shares, capital):
+        plan = []
+        plan.append(f"\n{'-'*90}")
+        plan.append(f"📊 {entry.symbol} | Strategy: {entry.entry_strategy.value} | Structure: {entry.structure.value}")
+        plan.append(f"Risk: {entry.risk_rating:<6} | Confidence: {entry.confidence*100:.0f}% | "
+                    f"Capital: {capital:,.0f} | Shares: {total_shares:,}")
+        plan.append(f"Entry Zone: {entry.entry_zone_low:.0f} - {entry.entry_zone_high:.0f} "
+                    f"(Optimal: {entry.optimal_entry:.0f}) | Stop: {entry.stop_loss:.0f}")
+        plan.append(f"Targets: {entry.target_1:.0f} / {entry.target_2:.0f} / {entry.target_3:.0f}")
+        plan.append(f"Reason: {entry.entry_reason}")
+        plan.append(f"{'-'*90}")
+        return "\n".join(plan)
+
+    @staticmethod
+    def format_order_list(orders):
+        if not orders:
+            return "No actionable orders generated.\n"
+        lines = ["\n🧾 ENTRY ORDERS:"]
+        lines.append(f"{'ID':<3} {'Type':<10} {'Price':<10} {'Shares':<10} {'Size%':<7} {'Valid Until':<12} Notes")
+        lines.append("-"*80)
+        for o in orders:
+            lines.append(f"{o.order_id:<3} {o.order_type:<10} {o.price:<10.0f} {o.shares:<10} "
+                         f"{o.size_pct*100:<7.0f} {o.valid_until:<12} {o.notes}")
+        return "\n".join(lines)
